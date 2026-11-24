@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Municipal Corporation: Pothole Reports</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#14171a; --panel:#1e2328; --text:#eef1f3; --muted:#8d98a1; --accent:#ffb703; --danger:#e63946; --ok:#4cc38a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:14px 16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; }
+  h1 { font-size:20px; margin:0; }
+  .tabs button, .refresh { font-size:14px; font-weight:600; padding:8px 14px; border:0; border-radius:8px; background:var(--panel); color:var(--text); cursor:pointer; }
+  .tabs button.active { background:var(--accent); color:#1a1400; }
+  .layout { display:grid; grid-template-columns: 1fr 380px; gap:12px; padding:0 16px 16px; }
+  #map { height:70vh; border-radius:12px; }
+  #list { max-height:70vh; overflow-y:auto; }
+  .card { background:var(--panel); border-radius:12px; padding:10px; margin-bottom:10px; display:flex; gap:10px; cursor:pointer; }
+  .card img, .card .noimg { width:96px; height:72px; object-fit:cover; border-radius:8px; flex:none; background:#0d0f11; }
+  .card .noimg { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:12px; text-align:center; }
+  .info { flex:1; min-width:0; font-size:13px; }
+  .info div { margin-bottom:3px; }
+  .muted { color:var(--muted); }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; font-weight:700; }
+  .badge.reported { background:var(--danger); color:#fff; }
+  .badge.repaired { background:var(--ok); color:#06210f; }
+  .repair { margin-top:4px; font-size:13px; font-weight:600; padding:7px 10px; border:0; border-radius:8px; background:var(--accent); color:#1a1400; cursor:pointer; }
+  #msg { padding:0 16px 8px; color:var(--muted); font-size:14px; min-height:22px; }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } #map { height:45vh; } #list { max-height:none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Municipal Corporation: Pothole Reports</h1>
+  <div class="tabs">
+    <button data-filter="reported" class="active">Open</button>
+    <button data-filter="repaired">Repaired</button>
+    <button data-filter="all">All</button>
+    <button class="refresh" id="refresh">Refresh</button>
+  </div>
+</header>
+<div id="msg"></div>
+<div class="layout">
+  <div id="map"></div>
+  <div id="list"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const SUPABASE_URL = "https://cjbsyqvyfqqfkbgbgfrv.supabase.co";
+const SUPABASE_KEY = "sb_publishable_n-Xt6Buw9jgL-l7SqUh0ZQ_tOkrMfcQ";
+const REFRESH_MS = 5000;
+
+const $ = (id) => document.getElementById(id);
+const map = L.map("map").setView([20.5937, 78.9629], 5); // India overview until reports load
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+let reports = [], filter = "reported", markers = {}, firstFit = true;
+
+async function api(path, options = {}) {
+  const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+    ...options,
+    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!res.ok) throw new Error("database error " + res.status);
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function load() {
+  try {
+    reports = await api("reports?select=*&order=created_at.desc") || [];
+    $("msg").textContent = "Updated " + new Date().toLocaleTimeString();
+    render();
+  } catch (e) {
+    $("msg").textContent = "Could not load reports: " + e.message;
+  }
+}
+
+function render() {
+  const shown = reports.filter((r) => filter === "all" || r.status === filter);
+  const list = $("list");
+  list.innerHTML = "";
+
+  Object.values(markers).forEach((m) => map.removeLayer(m));
+  markers = {};
+
+  if (!shown.length) {
+    list.innerHTML = '<div class="muted" style="padding:10px">No reports here.</div>';
+    return;
+  }
+
+  shown.forEach((r) => {
+    const color = r.status === "repaired" ? "#4cc38a" : "#e63946";
+    markers[r.id] = L.circleMarker([r.lat, r.lng], { radius: 9, color, fillColor: color, fillOpacity: 0.7 })
+      .addTo(map)
+      .bindPopup((r.status === "repaired" ? "Repaired" : "Open") + ": seen " + r.detections + "x");
+
+    const card = document.createElement("div");
+    card.className = "card";
+
+    if (r.image) {
+      const img = document.createElement("img");
+      img.src = r.image;
+      img.alt = "Reported pothole";
+      card.appendChild(img);
+    } else {
+      const none = document.createElement("div");
+      none.className = "noimg";
+      none.textContent = "Photo deleted";
+      card.appendChild(none);
+    }
+
+    const info = document.createElement("div");
+    info.className = "info";
+
+    const badge = document.createElement("span");
+    badge.className = "badge " + r.status;
+    badge.textContent = r.status === "repaired" ? "Repaired" : "Open";
+
+    const lines = [
+      ["", null, badge],
+      ["muted", new Date(r.created_at).toLocaleString()],
+      ["", r.lat.toFixed(5) + ", " + r.lng.toFixed(5) + (r.accuracy ? " (±" + Math.round(r.accuracy) + " m)" : "")],
+      ["", "Seen " + r.detections + "x, confidence " + (r.confidence != null ? Number(r.confidence).toFixed(2) : "n/a")],
+    ];
+    lines.forEach(([cls, text, node]) => {
+      const d = document.createElement("div");
+      if (cls) d.className = cls;
+      if (node) d.appendChild(node); else d.textContent = text;
+      info.appendChild(d);
+    });
+
+    if (r.status === "reported") {
+      const btn = document.createElement("button");
+      btn.className = "repair";
+      btn.textContent = "Mark as repaired";
+      btn.onclick = (e) => { e.stopPropagation(); markRepaired(r.id); };
+      info.appendChild(btn);
+    } else if (r.repaired_at) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Repaired " + new Date(r.repaired_at).toLocaleString();
+      info.appendChild(d);
+    }
+
+    card.appendChild(info);
+    card.onclick = () => { map.setView([r.lat, r.lng], 17); markers[r.id].openPopup(); };
+    list.appendChild(card);
+  });
+
+  if (firstFit) {
+    map.fitBounds(shown.map((r) => [r.lat, r.lng]), { padding: [40, 40], maxZoom: 16 });
+    firstFit = false;
+  }
+}
+
+async function markRepaired(id) {
+  if (!confirm("Mark this pothole as repaired? The photo will be deleted.")) return;
+  try {
+    await api("reports?id=eq." + id, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ status: "repaired", image: null, repaired_at: new Date().toISOString() }),
+    });
+    await load();
+  } catch (e) {
+    $("msg").textContent = "Could not update: " + e.message;
+  }
+}
+
+document.querySelectorAll(".tabs button[data-filter]").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll(".tabs button[data-filter]").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    filter = b.dataset.filter;
+    firstFit = true;
+    render();
+  };
+});
+$("refresh").onclick = load;
+
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
